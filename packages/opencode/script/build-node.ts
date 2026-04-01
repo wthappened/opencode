@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import { $ } from "bun"
 import fs from "fs"
 import path from "path"
 import { fileURLToPath } from "url"
@@ -40,11 +41,14 @@ const migrations = await Promise.all(
 )
 console.log(`Loaded ${migrations.length} migrations`)
 
+await $`bun install --os="*" --cpu="*" @lydell/node-pty@1.2.0-beta.10`
+
 await Bun.build({
   target: "node",
   entrypoints: ["./src/node.ts"],
   outdir: "./dist/node",
   format: "esm",
+  sourcemap: "linked",
   external: ["jsonc-parser"],
   define: {
     OPENCODE_MIGRATIONS: JSON.stringify(migrations),

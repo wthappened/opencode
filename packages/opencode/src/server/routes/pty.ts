@@ -1,15 +1,14 @@
 import { Hono } from "hono"
 import { describeRoute, validator, resolver } from "hono-openapi"
-import { upgradeWebSocket } from "hono/bun"
+import type { UpgradeWebSocket } from "hono/ws"
 import z from "zod"
 import { Pty } from "@/pty"
 import { PtyID } from "@/pty/schema"
 import { NotFoundError } from "../../storage/db"
 import { errors } from "../error"
-import { lazy } from "../../util/lazy"
 
-export const PtyRoutes = lazy(() =>
-  new Hono()
+export function PtyRoutes(upgradeWebSocket?: UpgradeWebSocket) {
+  const app = new Hono()
     .get(
       "/",
       describeRoute({
@@ -131,81 +130,83 @@ export const PtyRoutes = lazy(() =>
         return c.json(true)
       },
     )
-    .get(
-      "/:ptyID/connect",
-      describeRoute({
-        summary: "Connect to PTY session",
-        description: "Establish a WebSocket connection to interact with a pseudo-terminal (PTY) session in real-time.",
-        operationId: "pty.connect",
-        responses: {
-          200: {
-            description: "Connected session",
-            content: {
-              "application/json": {
-                schema: resolver(z.boolean()),
-              },
+  if (!upgradeWebSocket) return app
+
+  return app.get(
+    "/:ptyID/connect",
+    describeRoute({
+      summary: "Connect to PTY session",
+      description: "Establish a WebSocket connection to interact with a pseudo-terminal (PTY) session in real-time.",
+      operationId: "pty.connect",
+      responses: {
+        200: {
+          description: "Connected session",
+          content: {
+            "application/json": {
+              schema: resolver(z.boolean()),
             },
           },
-          ...errors(404),
         },
-      }),
-      validator("param", z.object({ ptyID: PtyID.zod })),
-      upgradeWebSocket(async (c) => {
-        const id = PtyID.zod.parse(c.req.param("ptyID"))
-        const cursor = (() => {
-          const value = c.req.query("cursor")
-          if (!value) return
-          const parsed = Number(value)
-          if (!Number.isSafeInteger(parsed) || parsed < -1) return
-          return parsed
-        })()
-        let handler: Awaited<ReturnType<typeof Pty.connect>>
-        if (!(await Pty.get(id))) throw new Error("Session not found")
+        ...errors(404),
+      },
+    }),
+    validator("param", z.object({ ptyID: PtyID.zod })),
+    upgradeWebSocket(async (c) => {
+      const id = PtyID.zod.parse(c.req.param("ptyID"))
+      const cursor = (() => {
+        const value = c.req.query("cursor")
+        if (!value) return
+        const parsed = Number(value)
+        if (!Number.isSafeInteger(parsed) || parsed < -1) return
+        return parsed
+      })()
+      let handler: Awaited<ReturnType<typeof Pty.connect>>
+      if (!(await Pty.get(id))) throw new Error("Session not found")
 
-        type Socket = {
-          readyState: number
-          send: (data: string | Uint8Array | ArrayBuffer) => void
-          close: (code?: number, reason?: string) => void
-        }
+      type Socket = {
+        readyState: number
+        send: (data: string | Uint8Array | ArrayBuffer) => void
+        close: (code?: number, reason?: string) => void
+      }
 
-        const isSocket = (value: unknown): value is Socket => {
-          if (!value || typeof value !== "object") return false
-          if (!("readyState" in value)) return false
-          if (!("send" in value) || typeof (value as { send?: unknown }).send !== "function") return false
-          if (!("close" in value) || typeof (value as { close?: unknown }).close !== "function") return false
-          return typeof (value as { readyState?: unknown }).readyState === "number"
-        }
+      const isSocket = (value: unknown): value is Socket => {
+        if (!value || typeof value !== "object") return false
+        if (!("readyState" in value)) return false
+        if (!("send" in value) || typeof (value as { send?: unknown }).send !== "function") return false
+        if (!("close" in value) || typeof (value as { close?: unknown }).close !== "function") return false
+        return typeof (value as { readyState?: unknown }).readyState === "number"
+      }
 
-        const pending: string[] = []
-        let ready = false
+      const pending: string[] = []
+      let ready = false
 
-        return {
-          async onOpen(_event, ws) {
-            const socket = ws.raw
-            if (!isSocket(socket)) {
-              ws.close()
-              return
-            }
-            handler = await Pty.connect(id, socket, cursor)
-            ready = true
-            for (const msg of pending) handler?.onMessage(msg)
-            pending.length = 0
-          },
-          onMessage(event) {
-            if (typeof event.data !== "string") return
-            if (!ready) {
-              pending.push(event.data)
-              return
-            }
-            handler?.onMessage(event.data)
-          },
-          onClose() {
-            handler?.onClose()
-          },
-          onError() {
-            handler?.onClose()
-          },
-        }
-      }),
-    ),
-)
+      return {
+        async onOpen(_event, ws) {
+          const socket = ws.raw
+          if (!isSocket(socket)) {
+            ws.close()
+            return
+          }
+          handler = await Pty.connect(id, socket, cursor)
+          ready = true
+          for (const msg of pending) handler?.onMessage(msg)
+          pending.length = 0
+        },
+        onMessage(event) {
+          if (typeof event.data !== "string") return
+          if (!ready) {
+            pending.push(event.data)
+            return
+          }
+          handler?.onMessage(event.data)
+        },
+        onClose() {
+          handler?.onClose()
+        },
+        onError() {
+          handler?.onClose()
+        },
+      }
+    }),
+  )
+}
